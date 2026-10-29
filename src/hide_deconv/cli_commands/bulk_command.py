@@ -1,0 +1,679 @@
+"""
+=====================================================
+ViewModel functions for all CLI bulk commands
+=====================================================
+"""
+
+from rich.console import Console
+from pathlib import Path
+import pandas as pd
+
+from ..constants import (
+    MSG_FAILURE,
+    MSG_SUCCESS,
+)
+
+from InquirerPy import inquirer
+from InquirerPy.base.control import Choice
+from InquirerPy.validator import PathValidator
+
+from rich.prompt import Confirm
+
+from ..visualization import plot_pca, plot_umap
+from ..utils import sample_ids_valid, filter_sample_sheet
+from ..preprocessing import combine_bulk_dataframes
+from ..statistic import run_clustering, pydeseq2_preprocess, run_pydeseq2
+from ..utils import check_bulk_raw
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+console = Console()
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def create_bulk_pca_plot() -> int:
+    """
+    Select a RNA-seq bulk and create a PCA plot.
+    """
+    console.print("[bold blue]Bulk PCA plotting[/bold blue]")
+
+    ret = MSG_SUCCESS
+
+    bulk_path = inquirer.filepath(
+        message="Enter path to bulk RNA expression file:",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Loading bulk RNA expression file...[/bold blue]", spinner="dots"
+        ):
+            bulk = pd.read_csv(bulk_path, index_col=0)
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    fSelectSampleSheet = Confirm.ask(
+        "Select additional sample sheet for annotating?", default=True
+    )
+    labels = None
+    if fSelectSampleSheet:
+        samplesheet_path = inquirer.filepath(
+            message="Select sample sheet:",
+            default=str(Path.cwd()),
+            mandatory=True,
+            mandatory_message="An sample sheet (.csv) must be selected to continue.",
+            validate=PathValidator(is_file=True, message="Input is not a file."),
+        ).execute()
+
+        try:
+            sample_sheet = pd.read_csv(samplesheet_path)
+
+            available_sample_cols = sample_sheet.columns.to_list()
+
+            # Select column to link sample sheet with deconvoluted results
+            available_sample_cols = sample_sheet.columns.to_list()
+
+            sample_id_col = inquirer.select(
+                message="Select column that holds sample ids:",
+                choices=available_sample_cols,
+                default=available_sample_cols[0],
+                height=5,
+            ).execute()
+
+            if sample_ids_valid(sample_sheet[sample_id_col], bulk.columns.to_list()):
+                available_sample_cols.remove(sample_id_col)
+
+                cohort_cols = [
+                    Choice(
+                        value=col,
+                        name=f"{col} [Unique Cohorts: {len(sample_sheet[col].unique())}]",
+                    )
+                    for col in available_sample_cols
+                    if len(sample_sheet[col].unique()) > 1
+                ]
+
+                cohort_col = inquirer.select(
+                    message="Select column that will be used to annotate cohorts:",
+                    choices=cohort_cols,
+                    height=5,
+                ).execute()
+
+                ids = sample_sheet[sample_id_col]
+                ids, sample_sheet = filter_sample_sheet(sample_sheet, sample_id_col)
+
+                cohorts = sample_sheet[cohort_col]
+                labels = labels = (
+                    pd.Series(cohorts.values, index=ids).reindex(bulk.columns).to_list()
+                )
+        except Exception:
+            console.print_exception()
+            console.print("[red]Cannot open sample sheet.[/red]")
+            console.print("[dim]Please provide a valid sample sheet.[/dim]")
+            return MSG_FAILURE
+
+    if labels is None:
+        plot_pca(
+            bulk,
+            out_path=f"{Path(bulk_path).parent}/{Path(bulk_path).stem}" + "_pca.png",
+            title_suffix=" RNA-seq",
+            biplot=True,
+        )
+    else:
+        plot_pca(
+            bulk,
+            out_path=f"{Path(bulk_path).parent}/{Path(bulk_path).stem}_{cohort_col}_pca.png",
+            labeling=labels,
+            group_name=cohort_col,
+            title_suffix=" RNA-seq",
+            biplot=True,
+        )
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def create_bulk_umap_plot() -> int:
+    """
+    Select a RNA-seq bulk and create an UMAP plot.
+    """
+    console.print("[bold blue]Bulk UMAP plotting[/bold blue]")
+
+    ret = MSG_SUCCESS
+
+    bulk_path = inquirer.filepath(
+        message="Enter path to bulk RNA expression file:",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Loading bulk RNA expression file...[/bold blue]", spinner="dots"
+        ):
+            bulk = pd.read_csv(bulk_path, index_col=0)
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    fSelectSampleSheet = Confirm.ask(
+        "Select additional sample sheet for annotating?", default=True
+    )
+    labels = None
+    if fSelectSampleSheet:
+        samplesheet_path = inquirer.filepath(
+            message="Select sample sheet:",
+            default=str(Path.cwd()),
+            mandatory=True,
+            mandatory_message="An sample sheet (.csv) must be selected to continue.",
+            validate=PathValidator(is_file=True, message="Input is not a file."),
+        ).execute()
+
+        try:
+            sample_sheet = pd.read_csv(samplesheet_path)
+
+            available_sample_cols = sample_sheet.columns.to_list()
+
+            # Select column to link sample sheet with deconvoluted results
+            available_sample_cols = sample_sheet.columns.to_list()
+
+            sample_id_col = inquirer.select(
+                message="Select column that holds sample ids:",
+                choices=available_sample_cols,
+                default=available_sample_cols[0],
+                height=5,
+            ).execute()
+
+            if sample_ids_valid(sample_sheet[sample_id_col], bulk.columns.to_list()):
+                available_sample_cols.remove(sample_id_col)
+
+                cohort_cols = [
+                    Choice(
+                        value=col,
+                        name=f"{col} [Unique Cohorts: {len(sample_sheet[col].unique())}]",
+                    )
+                    for col in available_sample_cols
+                    if len(sample_sheet[col].unique()) > 1
+                ]
+
+                cohort_col = inquirer.select(
+                    message="Select column that will be used to annotate cohorts:",
+                    choices=cohort_cols,
+                    height=5,
+                ).execute()
+
+                ids = sample_sheet[sample_id_col]
+                ids, sample_sheet = filter_sample_sheet(sample_sheet, sample_id_col)
+
+                cohorts = sample_sheet[cohort_col]
+                labels = labels = (
+                    pd.Series(cohorts.values, index=ids).reindex(bulk.columns).to_list()
+                )
+        except Exception:
+            console.print_exception()
+            console.print("[red]Cannot open sample sheet.[/red]")
+            console.print("[dim]Please provide a valid sample sheet.[/dim]")
+            return MSG_FAILURE
+
+    if labels is None:
+        plot_umap(
+            bulk,
+            out_path=f"{Path(bulk_path).parent}/{Path(bulk_path).stem}" + "_umap.png",
+            title_suffix=" RNA-seq",
+        )
+    else:
+        plot_umap(
+            bulk,
+            out_path=f"{Path(bulk_path).parent}/{Path(bulk_path).stem}_{cohort_col}_umap.png",
+            labeling=labels,
+            group_name=cohort_col,
+            title_suffix=" RNA-seq",
+        )
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def merge_bulks() -> int:
+    """
+    Select multiple RNA-seq bulks, merge them and correct for batch effects.
+
+    Returns
+    -------
+    int
+        Either MSG_SUCCESS or MSG_FAILURE
+    """
+    console.print("[bold blue]Bulk Merging[/bold blue]")
+
+    ret = MSG_SUCCESS
+    bulk_paths = []
+
+    try:
+        add_dataset = True
+        while add_dataset:
+            bulk_path = inquirer.filepath(
+                message="Select bulk RNA expression file:",
+                default=str(Path.cwd()),
+                mandatory=True,
+                mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+                validate=PathValidator(is_file=True, message="Input is not a file."),
+            ).execute()
+
+            bulk_paths.append(bulk_path)
+            add_dataset = Confirm.ask("Add another dataset?", default=True)
+
+        merged_bulk_path = inquirer.text(
+            message="Enter path, where merged bulk will be stored:",
+            default=str(Path.cwd()) + "/merged_bulks.csv",
+            mandatory=True,
+        ).execute()
+
+        with console.status(
+            "[bold blue]Merging bulk RNA expression files...[/bold blue]",
+            spinner="dots",
+        ):
+            data_frames = [pd.read_csv(path, index_col=0) for path in bulk_paths]
+            merged_bulk, batches_info = combine_bulk_dataframes(data_frames)
+
+        merged_bulk.to_csv(merged_bulk_path)
+        batches_info.to_csv(
+            Path(merged_bulk_path).with_name(
+                Path(merged_bulk_path).stem + "_batch_info.csv"
+            )
+        )
+
+        console.print(f"[green]Merged bulk saved to {merged_bulk_path}[/green]")
+    except ValueError:
+        console.print("[red]No common gene subset was found![/red]")
+        return MSG_FAILURE
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def subset_bulk() -> int:
+    """
+    Subsets a bulk RNA-seq expression file.
+    """
+    console.print("[bold blue]Bulk Subsetting[/bold blue]")
+
+    bulk_path = inquirer.filepath(
+        message="Enter path to bulk RNA expression file:",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Loading bulk RNA expression file...[/bold blue]", spinner="dots"
+        ):
+            bulk = pd.read_csv(bulk_path, index_col=0)
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    try:
+        samplesheet_path = inquirer.filepath(
+            message="Select sample sheet:",
+            default=str(Path.cwd()),
+            mandatory=True,
+            mandatory_message="A sample sheet (.csv) must be selected to continue subsetting.",
+            validate=PathValidator(is_file=True, message="Input is not a file."),
+        ).execute()
+
+        sample_sheet = pd.read_csv(samplesheet_path)
+
+        available_sample_cols = sample_sheet.columns.to_list()
+
+        sample_id_col = inquirer.select(
+            message="Select column that holds sample ids:",
+            choices=available_sample_cols,
+            default=available_sample_cols[0],
+            height=5,
+        ).execute()
+
+        if not sample_ids_valid(sample_sheet[sample_id_col], bulk.columns.to_list()):
+            console.print(
+                f"[red]Bulk sample ids are no subset of {sample_id_col} column of sample sheet.[/red]"
+            )
+            return MSG_FAILURE
+
+        available_sample_cols.remove(sample_id_col)
+
+        cohort_cols = [
+            Choice(
+                value=col,
+                name=f"{col} [Unique Cohorts: {len(sample_sheet[col].unique())}]",
+            )
+            for col in available_sample_cols
+            if len(sample_sheet[col].unique()) > 1
+        ]
+
+        if len(cohort_cols) == 0:
+            console.print(
+                "[red]No suitable sample sheet column was found for subsetting.[/red]"
+            )
+            return MSG_FAILURE
+
+        cohort_col = inquirer.select(
+            message="Select column that will be used to define the subset:",
+            choices=cohort_cols,
+            height=5,
+        ).execute()
+
+        values = inquirer.checkbox(
+            message="Select the cohort values to keep:",
+            choices=[
+                str(value) for value in sample_sheet[cohort_col].dropna().unique()
+            ],
+            max_height=5,
+            mandatory=True,
+            mandatory_message="Please select at least one entry.",
+        ).execute()
+
+        if len(values) == 0:
+            console.print("[yellow]Please select at least one value.[/yellow]")
+            return MSG_FAILURE
+
+        ids, sample_sheet = filter_sample_sheet(sample_sheet, sample_id_col)
+        selected_ids = sample_sheet[sample_sheet[cohort_col].astype(str).isin(values)][
+            sample_id_col
+        ].astype(str)
+
+        with console.status(
+            "[bold blue]Subsetting bulk RNA expression file...[/bold blue]",
+            spinner="dots",
+        ):
+            subset_df = bulk.loc[
+                :, [col for col in bulk.columns if col in selected_ids.to_list()]
+            ]
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    subset_path = Path(bulk_path).with_name(
+        f"{Path(bulk_path).stem}_{cohort_col}_subset.csv"
+    )
+
+    with console.status(
+        "[bold blue]Saving subsetted file...[/bold blue]",
+        spinner="dots",
+    ):
+        subset_df.to_csv(subset_path)
+
+    console.print(f"[bold green]Saved subsetted file to {subset_path}[/bold green]")
+
+    return MSG_SUCCESS
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def create_bulk_clustering() -> int:
+    """
+    Select a RNA-seq bulk and assign clusters to the samples.
+    """
+    console.print("[bold blue]Bulk Clustering[/bold blue]")
+
+    ret = MSG_SUCCESS
+
+    bulk_path = inquirer.filepath(
+        message="Enter path to bulk RNA expression file:",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Loading bulk RNA expression file...[/bold blue]", spinner="dots"
+        ):
+            bulk = pd.read_csv(bulk_path, index_col=0)
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    cluster_ass = run_clustering(bulk, is_bulk=True)
+
+    cluster_ass.to_csv(
+        f"{Path(bulk_path).parent}/clusters.csv",
+    )
+
+    plot_pca(
+        bulk,
+        f"{Path(bulk_path).parent}/clusters_pca.png",
+        labeling=cluster_ass["assigned_cluster"].to_list(),
+        group_name="cluster",
+    )
+
+    plot_umap(
+        bulk,
+        f"{Path(bulk_path).parent}/clusters_umap.png",
+        labeling=cluster_ass["assigned_cluster"].to_list(),
+        group_name="cluster",
+    )
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def create_bulk_deg() -> int:
+    """
+    Run pydeseq2 on a selected bulk.
+    """
+    console.print("[bold blue]Bulk DEG Analysis[/bold blue]")
+
+    bulk_path = inquirer.filepath(
+        message="Enter path to bulk RNA expression file:",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A bulk RNA expression file (.csv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Loading bulk RNA expression file...[/bold blue]", spinner="dots"
+        ):
+            bulk = pd.read_csv(bulk_path, index_col=0)
+            bulk = bulk.apply(pd.to_numeric, errors="coerce")
+    except Exception:
+        console.print_exception()
+        return MSG_FAILURE
+
+    if not check_bulk_raw(bulk):
+        console.print("[red]Bulk file must contain raw counts.[/red]")
+        return MSG_FAILURE
+
+    try:
+        samplesheet_path = inquirer.filepath(
+            message="Select sample sheet:",
+            default=str(Path.cwd()),
+            mandatory=True,
+            mandatory_message="A sample sheet (.csv) must be selected to continue.",
+            validate=PathValidator(is_file=True, message="Input is not a file."),
+        ).execute()
+
+        sample_sheet = pd.read_csv(samplesheet_path)
+        available_sample_cols = sample_sheet.columns.to_list()
+
+        sample_id_col = inquirer.select(
+            message="Select column that holds sample ids:",
+            choices=available_sample_cols,
+            default=available_sample_cols[0],
+            height=5,
+        ).execute()
+
+        if not sample_ids_valid(sample_sheet[sample_id_col], bulk.columns.to_list()):
+            console.print(
+                f"[red]Bulk sample ids are no subset of {sample_id_col} column of sample sheet.[/red]"
+            )
+            return MSG_FAILURE
+
+        available_sample_cols.remove(sample_id_col)
+
+        condition_cols = [
+            Choice(
+                value=col,
+                name=f"{col} [Unique Cohorts: {len(sample_sheet[col].dropna().unique())}]",
+            )
+            for col in available_sample_cols
+            if len(sample_sheet[col].dropna().unique()) == 2
+        ]
+
+        if len(condition_cols) == 0:
+            console.print(
+                "[red]Sample sheet does not contain a column with exactly two conditions.[/red]"
+            )
+            return MSG_FAILURE
+
+        condition_col = inquirer.select(
+            message="Select column that holds the condition:",
+            choices=condition_cols,
+            height=5,
+        ).execute()
+
+        condition_values = (
+            sample_sheet[condition_col].dropna().astype(str).unique().tolist()
+        )
+        reference_condition = inquirer.select(
+            message="Select reference condition:",
+            choices=condition_values,
+            default=condition_values[0],
+            height=5,
+        ).execute()
+        tested_condition = [
+            value for value in condition_values if value != reference_condition
+        ][0]
+
+        include_covariates = Confirm.ask(
+            "Include additional covariates?", default=False
+        )
+        covariates = None
+        if include_covariates:
+            available_covariates = [
+                col for col in available_sample_cols if col != condition_col
+            ]
+            if len(available_covariates) > 0:
+                covariates = inquirer.checkbox(
+                    message="Select covariates:",
+                    choices=available_covariates,
+                    max_height=5,
+                    mandatory=True,
+                    mandatory_message="Please select at least one entry.",
+                ).execute()
+
+                if len(covariates) == 0:
+                    covariates = None
+
+        counts, metadata = pydeseq2_preprocess(
+            bulk,
+            sample_sheet,
+            sample_id_col,
+            condition_col,
+            covariates,
+        )
+
+        out_path = Path(bulk_path).with_name(
+            f"{Path(bulk_path).stem}_deg_{condition_col}_{tested_condition}_vs_{reference_condition}"
+        )
+
+        with console.status(
+            "[bold blue]Running PyDESeq2...[/bold blue]", spinner="dots"
+        ):
+            run_pydeseq2(
+                counts,
+                metadata,
+                condition_col,
+                tested_condition,
+                reference_condition,
+                covariates,
+                out_path,
+            )
+
+        console.print(f"[green]Saved DEG results to {out_path.parent}[/green]")
+
+    except Exception:
+        console.print_exception()
+        console.print("[red]Cannot open sample sheet.[/red]")
+        console.print("[dim]Please provide a valid sample sheet.[/dim]")
+        return MSG_FAILURE
+
+    return MSG_SUCCESS
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def convert_csv_from_mtx() -> int:
+    """
+    Converts a selected mtx file to a csv table
+    """
+    from ..utils import mtx_to_csv
+
+    console.print("[bold blue]MTX Conversion[/bold blue]")
+
+    mtx_path = inquirer.filepath(
+        message="Enter path to matrix file (*_matrix.mtx):",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A matrix file (.mtx) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    barcodes_path = inquirer.filepath(
+        message="Enter path to barcodes file (*_barcodes.csv / .tsv):",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A barcode csv or tsv file (.csv / .tsv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    features_path = inquirer.filepath(
+        message="Enter path to features file (*_features.csv / .tsv):",
+        default=str(Path.cwd()),
+        mandatory=True,
+        mandatory_message="A features csv or tsv file (.csv / .tsv) must be selected to continue.",
+        validate=PathValidator(is_file=True, message="Input is not a file."),
+    ).execute()
+
+    try:
+        with console.status(
+            "[bold blue]Converting MTX file...[/bold blue]", spinner="dots"
+        ):
+            df_converted = mtx_to_csv(mtx_path, barcodes_path, features_path)
+
+            df_converted.to_csv(Path(mtx_path).with_suffix(".csv"))
+
+        console.print(
+            f"[green]Saved converted file to {Path(mtx_path).with_suffix('.csv')}[/green]"
+        )
+
+    except Exception:
+        console.print_exception()
+        console.print("[red]Failed to convert mtx.[/red]")
+        console.print("[dim]Please provide valid mtx data.[/dim]")
+        return MSG_FAILURE
+
+    return MSG_SUCCESS

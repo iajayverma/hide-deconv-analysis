@@ -1,0 +1,144 @@
+"""
+=====================================================
+Methods for loading and preprocessing of bulk data.
+=====================================================
+"""
+
+import anndata as ad
+import pandas as pd
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def get_common_genes(
+    adata: ad.AnnData, bulk: pd.DataFrame, remove_zero_median=True
+) -> list[str]:
+    """
+    Return genes present in both single-cell and bulk expression data.
+
+    The function computes the intersection between gene names in adata.var_names
+    and the bulk expressions.
+
+    Additionally remove genes, which have a median of 0 in the bulk, as these can influence domain transfer.
+
+    Gene Symbols that are duplicate will be added together (Preferentably to use EnsemblIDs).
+
+    Parameters
+    ----------
+    adata : ad.AnnData
+        AnnData object containing single-cell expression data.
+        Gene names are taken from adata.var_names
+
+    bulk : pd.DataFrame
+        Bulk expression profiles with genes as index and samples as columns
+
+    remove_zero_median : bool = True
+        Remove genes that have a median expression of zero
+
+    Returns
+    -------
+    list[str]
+        List of shared gene names
+
+    """
+
+    # Handle duplicate Gene Symbols, appear sometimes after converting from EnsemblIDs to GeneSymbol
+    if bulk.index.has_duplicates:
+        bulk = bulk.groupby(level=0).sum()
+
+    if remove_zero_median:
+        bulk_med = bulk.median(axis=1)
+        zero_genes = bulk_med[bulk_med == 0].index
+        if len(zero_genes) > 0:
+            bulk = bulk.drop(index=zero_genes)
+
+    genes_sc = set(adata.var_names)
+    genes_bulk = set(bulk.index)
+    common_genes = list(genes_sc.intersection(genes_bulk))
+
+    return common_genes
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def get_domain_transfer_factor(df1: pd.DataFrame, df2: pd.DataFrame) -> pd.Series:
+    """
+    Calculate the domain transfer factor to align two bulks
+
+    Parameters
+    ----------
+    df1 : pd.DataFrame
+        First dataframe
+    df2 : pd.DataFrame
+        Second dataframe
+
+    Returns
+    -------
+    pd.Series
+        Series containing the conversion factors for each gene
+    """
+    # \sum_g df1_g = \alpha \sum_g df2_g
+
+    mean_df1 = df1.median(axis=1)
+    mean_df2 = df2.median(axis=1)
+
+    alpha = mean_df1 / mean_df2
+
+    return alpha
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def combine_bulk_dataframes(
+    data_frames: list[pd.DataFrame],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Combines a list of bulk RNA seq dataframes and corrects for batch effects.
+
+    Parameters
+    ----------
+    data_frames : list[pd.DataFrame]
+        List of bulk RNA seq dataframes that should be combined.
+    Returns
+    -------
+    tuple[pd.DataFrame, pd.DataFrame]
+        DataFrame, containing the bulk labels as columns and the merged genes as rows and DataFrame containing assignment to original batches.
+    """
+
+    for i in range(len(data_frames)):
+        data_frames[i] = (
+            data_frames[i] * 1e6 / data_frames[i].sum(axis=0)
+        )  # CPM everything before reducing genes!
+
+    common_genes = data_frames[0].index
+    for i, df in enumerate(data_frames[1:]):
+        common_genes = common_genes.intersection(df[df.median(axis=1) > 0].index)
+
+    if len(common_genes) == 0:
+        raise ValueError("No shared genes found between input bulk dataframes.")
+
+    data_frames = [df.loc[common_genes].copy() for df in data_frames]
+
+    batch = []
+    for i, df in enumerate(data_frames):
+        batch.extend([f"batch_{i}" for _ in range(df.shape[1])])
+
+    if len(data_frames) > 1:
+        ref = data_frames[0]
+        ref_median = ref.median(axis=1)
+
+        aligned = [ref]
+        for df in data_frames[1:]:
+            tgt_median = df.median(axis=1)
+            alpha = (ref_median) / (tgt_median)
+            aligned.append(df.mul(alpha, axis=0))
+
+        data_frames = aligned
+
+    combined = pd.concat([df for df in data_frames], axis=1)
+
+    batch_df = pd.DataFrame(batch, columns=["batch"], index=combined.columns)
+
+    return combined, batch_df

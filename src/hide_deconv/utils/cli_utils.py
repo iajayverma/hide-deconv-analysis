@@ -1,0 +1,377 @@
+"""
+=====================================================
+Utility functions for command line interface
+=====================================================
+"""
+
+import inspect
+from pathlib import Path
+import os
+from functools import wraps
+from rich.console import Console
+import pandas as pd
+import numpy as np
+
+from InquirerPy import inquirer
+
+from ..config import hidedeconv_config
+
+from ..constants import (
+    MSG_ALREADY_INITIALIZED,
+    MSG_NOT_INITIALIZED,
+    MSG_ALREADY_PREPROCESSED,
+    MSG_NOT_PREPROCESSED,
+    MSG_ALREADY_TRAINED,
+    MSG_NOT_TRAINED,
+)
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+console = Console()
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def get_project_init_status(hidedeconv_path: Path) -> int:
+    """
+    Checks if project is correctly initialized at given path.
+
+    Returns
+    -------
+    int
+        Either MSG_ALREADY_INITIALIZED or MSG_NOT_INITIALIZED
+
+    """
+
+    ret = MSG_ALREADY_INITIALIZED
+
+    try:
+        if not os.path.exists(str(hidedeconv_path) + "/data/"):
+            ret = MSG_NOT_INITIALIZED
+
+        if not os.path.exists(str(hidedeconv_path) + "/processed/"):
+            ret = MSG_NOT_INITIALIZED
+
+        if not os.path.exists(str(hidedeconv_path) + "/results/"):
+            ret = MSG_NOT_INITIALIZED
+
+        hidedeconv_config.load(str(hidedeconv_path) + "/config.json")
+    except Exception:
+        ret = MSG_NOT_INITIALIZED
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def assert_init(func):
+    """
+    Decorator for function, that assures, that a project is located at the designated path.
+
+    It is necessary, that one first argument of the decorated function is named hidedeconv_path
+
+    Usage
+    -----
+    @assert_init
+
+    deconvolve(hidedeconv_path : Path, ....)
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        hidedeconv_path = bound.arguments.get("hidedeconv_path", None)
+
+        if get_project_init_status(hidedeconv_path) == MSG_ALREADY_INITIALIZED:
+            func(*args, **kwargs)
+        else:
+            console.print(
+                f"[red]No project located at {hidedeconv_path.absolute()}.[/red]"
+            )
+            console.print(
+                "[dim]Please create a project here using [i]hide-deconv init[/i] or attach a path to a valid project via the [i]-p <Path>[/i] keyword[/dim]"
+            )
+
+    return wrapper
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def get_project_preprocessed_status(hidedeconv_path: Path) -> int:
+    """
+    Checks if project at given path is preprocessed.
+
+    Returns
+    -------
+    int
+        Returns either MSG_NOT_PREPROCESSED or MSG_ALREADY_PREPROCESSED.
+
+    """
+
+    ret = MSG_ALREADY_PREPROCESSED
+
+    try:
+        hconf = hidedeconv_config.load(str(hidedeconv_path) + "/config.json")
+
+        if not hconf.preprocessed:
+            ret = MSG_NOT_PREPROCESSED
+
+    except Exception:
+        ret = MSG_NOT_PREPROCESSED
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def assert_preprocessed(func):
+    """
+    Decorator for function, that assures, that a project is located and preprocessed at the designated path.
+
+    It is necessary, that one argument of the decorated function is named hidedeconv_path
+
+    Usage
+    -----
+    @assert_preprocessed
+
+    deconvolve(hidedeconv_path : Path, ....)
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        hidedeconv_path = bound.arguments.get("hidedeconv_path", None)
+
+        if get_project_init_status(hidedeconv_path) == MSG_ALREADY_INITIALIZED:
+            if (
+                get_project_preprocessed_status(hidedeconv_path)
+                == MSG_ALREADY_PREPROCESSED
+            ):
+                func(*args, **kwargs)
+            else:
+                console.print(
+                    f"[red]Project located at {hidedeconv_path.absolute()} is not preprocessed.[/red]"
+                )
+                console.print(
+                    "[dim]Please preprocess project here using [i]hide-deconv preprocess[/i] or attach a path to a preprocessed project via the [i]-p <Path>[/i] keyword.[/dim]"
+                )
+        else:
+            console.print(
+                f"[red]No project located at {hidedeconv_path.absolute()}.[/red]"
+            )
+            console.print(
+                "[dim]Please create a project here using [i]hide-deconv init[/i] or attach a path to a valid project via the [i]-p <Path>[/i] keyword.[/dim]"
+            )
+
+    return wrapper
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def get_project_trained_status(hidedeconv_path: Path) -> int:
+    """
+    Checks if project at given path is trained.
+
+    Returns
+    -------
+    int
+        Returns either MSG_NOT_TRAINED or MSG_ALREADY_TRAINED.
+
+    """
+
+    ret = MSG_ALREADY_TRAINED
+
+    try:
+        hconf = hidedeconv_config.load(str(hidedeconv_path) + "/config.json")
+
+        if not hconf.trained:
+            ret = MSG_NOT_TRAINED
+
+    except Exception:
+        ret = MSG_NOT_TRAINED
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+def assert_trained(func):
+    """
+    Decorator for function, that assures, that a project is located and preprocessed at the designated path.
+
+    It is necessary, that one argument of the decorated function is named hidedeconv_path
+
+    Usage
+    -----
+    @assert_preprocessed
+
+    deconvolve(hidedeconv_path : Path, ....)
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        bound = inspect.signature(func).bind_partial(*args, **kwargs)
+        hidedeconv_path = bound.arguments.get("hidedeconv_path", None)
+
+        if get_project_init_status(hidedeconv_path) == MSG_ALREADY_INITIALIZED:
+            if (
+                get_project_preprocessed_status(hidedeconv_path)
+                == MSG_ALREADY_PREPROCESSED
+            ):
+                if get_project_trained_status(hidedeconv_path) == MSG_ALREADY_TRAINED:
+                    func(*args, **kwargs)
+                else:
+                    console.print(
+                        f"[red]Project located at {hidedeconv_path.absolute()} is not trained.[/red]"
+                    )
+                    console.print(
+                        "[dim]Please train project here using [i]hide-deconv train[/i] or attach a path to a trained project via the [i]-p <Path>[/i] keyword.[/dim]"
+                    )
+            else:
+                console.print(
+                    f"[red]Project located at {hidedeconv_path.absolute()} is not preprocessed.[/red]"
+                )
+                console.print(
+                    "[dim]Please preprocess project here using [i]hide-deconv preprocess[/i] or attach a path to a preprocessed project via the [i]-p <Path>[/i] keyword.[/dim]"
+                )
+        else:
+            console.print(
+                f"[red]No project located at {hidedeconv_path.absolute()}.[/red]"
+            )
+            console.print(
+                "[dim]Please create a project here using [i]hide-deconv init[/i] or attach a path to a valid project via the [i]-p <Path>[/i] keyword.[/dim]"
+            )
+
+    return wrapper
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def get_deconvolution_results(hidedeconv_path: Path) -> list[str]:
+    """
+    Gets all deconvoluted results available in a project.
+
+    Returns
+    -------
+    list[str]
+        List of folder names of all deconvoluted results
+    """
+
+    ret = []
+
+    try:
+        hconf = hidedeconv_config.load(str(hidedeconv_path) + "/config.json")
+
+        necessary_filenames = set(list(hconf.higher_ct_cols) + ["sub"])
+
+        result_folders = [
+            f.path for f in os.scandir(str(hidedeconv_path) + "/results/") if f.is_dir()
+        ]
+
+        if len(result_folders) > 0:
+            for folder in result_folders:
+                composition_layers = set()
+
+                for entry in os.scandir(folder):
+                    if not entry.is_file():
+                        continue
+
+                    name = Path(entry.path).name
+                    if name.startswith("C_") and name.endswith(".csv"):
+                        layer = Path(name).stem[2:]
+                        composition_layers.add(layer)
+                if len(composition_layers) > len(necessary_filenames):
+                    console.print(
+                        "[red]Warning: More files found in results folder than expected![/red]"
+                    )
+                    console.print(
+                        "[dim]Please ensure, that only the estimated compositions are stored as files starting with [i]C_[/i].[/dim]"
+                    )
+                    console.print(
+                        f"[dim]Identified {composition_layers} as composition layers.[/dim]"
+                    )
+                    console.print(f"[dim]Expected {necessary_filenames}.[/dim]")
+
+                if composition_layers == necessary_filenames:
+                    ret.append(Path(folder).stem)
+
+    except Exception:
+        ret = []
+
+    return ret
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def load_project_bulk(hidedeconv_path: Path) -> tuple[str, str, pd.DataFrame]:
+    """
+    Prompts the user to select deconvolution results at a specific cell type layer.
+
+    Returns
+    --------
+    tuple[str,str,pd.DataFrame]
+        Name of selected project, name of selected cell type layer and estimated composition dataframe
+
+    """
+
+    hconf = hidedeconv_config.load(str(hidedeconv_path) + "/config.json")
+
+    # Select deconvoluted data
+    available_projects = get_deconvolution_results(hidedeconv_path)
+
+    selected_project = inquirer.select(
+        message="Select result folder:",
+        choices=available_projects,
+        default=available_projects[0],
+        mandatory=True,
+    ).execute()
+
+    available_layers = ["sub"]
+    available_layers.extend(hconf.higher_ct_cols)
+
+    selected_ct_layer = inquirer.select(
+        message="Select cell type layer:",
+        choices=available_layers,
+        default="sub",
+        mandatory=True,
+    ).execute()
+
+    bulk = pd.read_csv(
+        str(hidedeconv_path)
+        + "/results/"
+        + selected_project
+        + "/C_"
+        + selected_ct_layer
+        + ".csv",
+        index_col=0,
+    )
+
+    return selected_project, selected_ct_layer, bulk
+
+
+# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+def check_bulk_raw(bulk: pd.DataFrame) -> bool:
+    """
+    Checks if a bulk matrix are raw counts.
+
+    Parameters
+    ----------
+    bulk : pd.DataFrame
+        Bulk to check
+
+    Returns
+    -------
+    bool
+        True if bulks consists of raw counts, False otherwise
+    """
+
+    numeric_bulk = bulk.apply(pd.to_numeric, errors="coerce")
+
+    if numeric_bulk.isna().any().any():
+        return False
+
+    values = numeric_bulk.to_numpy()
+    return bool((values >= 0).all() and np.allclose(values, np.round(values)))

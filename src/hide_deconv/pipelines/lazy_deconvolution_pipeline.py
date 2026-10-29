@@ -1,0 +1,212 @@
+"""
+=====================================================
+Underlying pipeline for the lazy deconvolution API
+=====================================================
+"""
+
+from __future__ import annotations
+
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+import scanpy as sc
+
+from ..constants import (
+    DOMAIN_TRANSFER_ALPHA_WINDOW,
+    DOMAIN_TRANSFER_BULK_COUNT,
+    DOMAIN_TRANSFER_PREDS_PER_BULK,
+    DOMAIN_TRANSFER_SEED,
+)
+from ..models import HIDE
+from ..preprocessing import (
+    create_bulks,
+    create_hierarchy,
+    create_reference,
+    get_common_genes,
+    reduce_genes,
+)
+from .deconvolve_hide_pipeline import (
+    normalize_bulk_to_cpm,
+    predict_deconvolution_results,
+)
+
+
+def normalize_celltype_cols(
+    celltype_cols: list[str] | tuple[str, ...] | str | None,
+) -> list[str]:
+    if celltype_cols is None:
+        return ["cell_type"]
+
+    if isinstance(celltype_cols, str):
+        return [celltype_cols]
+
+    cols = list(celltype_cols)
+    if len(cols) == 0:
+        raise ValueError("celltype_cols must contain at least one column name.")
+
+    return cols
+
+
+def validate_required_columns(adata: ad.AnnData, celltype_cols: list[str]) -> None:
+    missing = [col for col in celltype_cols if col not in adata.obs.columns]
+    if missing:
+        raise KeyError(
+            "The following cell type columns do not exists in the anndata file: "
+            + ", ".join(missing)
+        )
+
+
+def setup_model(
+    adata: ad.AnnData,
+    celltype_cols: list[str],
+    n_genes: int,
+    n_train_bulks: int,
+    n_cells_per_bulk: int,
+    n_iter: int,
+    seed: int,
+) -> tuple[HIDE, ad.AnnData]:
+
+    # adata is expected to be normalized to 1e4 on the complete gene set
+    adata = reduce_genes(adata, n_genes, celltype_cols[0])
+
+    X_sub = create_reference(adata, celltype_col=celltype_cols[0])
+    A_sub = pd.DataFrame(
+        np.eye(len(X_sub.columns), dtype=int),
+        index=X_sub.columns,
+        columns=X_sub.columns,
+    )
+
+    higher_cols = celltype_cols[1:]
+    hierarchy = (
+        create_hierarchy(adata, celltype_cols[0], higher_cols) if higher_cols else {}
+    )
+
+    X_ls = [X_sub]
+    A_ls = [A_sub]
+    for col in higher_cols:
+        X_ls.append(create_reference(adata, celltype_col=col))
+        A_ls.append(hierarchy[col])
+
+    model = HIDE(X_ls, A_ls)
+
+    Y_train, C_train = create_bulks(
+        adata,
+        n_train_bulks,
+        n_cells_per_bulk,
+        celltype_col=celltype_cols[0],
+        seed=seed,
+    )
+    model.train(Y_train, C_train, iter=n_iter)
+
+    return model, adata
+
+
+def deconvolution(
+    adata: ad.AnnData,
+    bulk: pd.DataFrame,
+    celltype_cols: list[str] | tuple[str, ...] | str | None = None,
+    n_genes: int = 5000,
+    n_train_bulks: int = 10000,
+    n_cells_per_bulk: int = 100,
+    n_iter: int = 1000,
+    domain_transfer: bool = True,
+    domain_transfer_bulk_count: int = DOMAIN_TRANSFER_BULK_COUNT,
+    preds_per_bulk: int = DOMAIN_TRANSFER_PREDS_PER_BULK,
+    alpha_window: int = DOMAIN_TRANSFER_ALPHA_WINDOW,
+    domain_transfer_seed: int = DOMAIN_TRANSFER_SEED,
+    library_size_correction: bool = True,
+    seed: int = 42,
+) -> list[pd.DataFrame]:
+    """
+    Run preprocessing, training and deconvolution in one call.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Annotated single-cell input data.
+    bulk : pd.DataFrame
+        Bulk expression with genes as rows and samples as columns.
+    celltype_cols : list[str], default=None
+        Cell type annotation columns in adata.obs. The first column is treated as
+        the finest cell type layer. If no columns are specified, column cell_type is used.
+    n_genes : int, default=5000
+        Number of genes used for training and deconvolution.
+    n_train_bulks : int, default=10000
+        Number of training bulks generated for training.
+    n_cells_per_bulk : int, default=100
+        Number of cells sampled per training bulk.
+    n_iter : int, default=1000
+        Number of training iterations.
+    domain_transfer : bool, default=True
+        Correct for domain transfer between Single Cell and Bulk data.
+    domain_transfer_bulk_count : int, default=1000
+        Number of simulated bulks used to calculate the domain-transfer factors.
+    preds_per_bulk : int, default=5
+        Approximate number of predictions per bulk sample during domain transfer.
+    alpha_window : int, default=25
+        Number of bulk samples used to calculate the domain-transfer factors per window.
+        If there are fewer than alpha_window + preds_per_bulk bulk samples, the
+        composition is estimated without domain transfer.
+    domain_transfer_seed : int, default=2304
+        Random seed for the simulated bulks and the assignment of the samples to
+        the domain-transfer windows.
+    library_size_correction: bool, default = True
+        Correct for library size differences between Single Cell and Bulk data.
+    seed : int, default=42
+        Random seed for the simulated training bulks.
+
+    Returns
+    -------
+    list[pd.DataFrame]
+        List of estimated composition, same order as the celltype_cols list.
+    """
+
+    celltype_cols = normalize_celltype_cols(celltype_cols)
+    validate_required_columns(adata, celltype_cols)
+
+    bulk = normalize_bulk_to_cpm(bulk)
+    adata.obs["library_size"] = np.asarray(adata.X.sum(axis=1)).ravel()
+    library_sizes = (
+        adata.obs.groupby(celltype_cols[0])["library_size"]
+        .median()
+        .rename("Median_Library_Size")
+    )
+    common_genes = get_common_genes(adata, bulk)
+    if len(common_genes) == 0:
+        raise ValueError("No shared genes found between adata and bulk.")
+
+    # Normalize before subsetting
+    adata = sc.pp.normalize_total(adata, target_sum=1e4, copy=True)
+    adata = adata[:, common_genes].copy()
+
+    model, adata = setup_model(
+        adata,
+        celltype_cols,
+        n_genes,
+        n_train_bulks,
+        n_cells_per_bulk,
+        n_iter,
+        seed,
+    )
+
+    bulk = bulk.loc[model.gene_labels]
+
+    if not library_size_correction:
+        library_sizes = None
+
+    predictions, _ = predict_deconvolution_results(
+        model,
+        adata,
+        bulk,
+        celltype_cols[0],
+        n_cells_per_bulk,
+        domain_transfer_bulk_count=domain_transfer_bulk_count,
+        preds_per_bulk=preds_per_bulk,
+        alpha_window=alpha_window,
+        domain_transfer=domain_transfer,
+        seed=domain_transfer_seed,
+        library_size_correction=library_sizes,
+    )
+
+    return predictions
